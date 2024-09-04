@@ -1,0 +1,708 @@
+
+/* ------------------------------------------------------------------------------- *
+	This application is for a DIY automotive G-Meter.  The meter when calibrated
+	should read +/- 1G left to right or +/- 1G front to rear.
+	
+	The center LED is always on as a reference point and the 3 LEDs to each side
+	are in PWM mode with varying brightness to indicate the level of force.  The
+	outside most LEDs when calibrated should indicate approximately 1G of force.
+
+	When initializing there is a brief light sequence.  Once running pressing the
+	button switches from left/right to front/rear.
+
+	A 2 second press starts the calibration mode.  See the comments for the
+	Calibrate() routine.  All LEDs flashing 3 times indicates that the device
+	needs calibration.
+ * ------------------------------------------------------------------------------- */
+
+#include <EEPROM.h>
+const int xout = A2;
+const int yout = A1;
+const int zout = A0;
+
+// Reversed Outputs
+// const int xout = A0;
+// const int yout = A1;
+// const int zout = A2;
+
+const int PB = 4;						// Push Button
+
+
+// LEDs - Left, Center, Right
+const int L4 = 12;
+const int L3 = 11;
+const int L2 = 10;
+const int L1 = 9;
+const int CTR = 8;
+const int R1 = 6;
+const int R2 = 5;
+const int R3 = 3;
+const int R4 = 2;
+
+const int STEPS = 8;					// Brightness Steps
+const int POINTS = 30;					// Number of Samples to Average
+const int RANGE = (STEPS * 3) + 1;		// Total Range / 2
+
+const int MODE_X = 0;
+const int MODE_Y = 1;
+
+const int LR_LoA = 0;
+const int LR_HiA = 2;
+
+const int FR_LoA = 4;
+const int FR_HiA = 6;
+
+// Left/Right Range
+int LR_Lo;
+int LR_Hi;
+
+// Front/Rear Range
+int FR_Lo;
+int FR_Hi;
+
+int mode = MODE_X;
+
+int LtLEDs[4] = { L1, L2, L3, L4};		// Assign Outputs to Left LEDS
+int RtLEDs[4] = { R1, R2, R3, R4 };		// Assign Outputs to Right LEDS
+int Levels[9] = { 0, 32, 64, 96, 128, 160, 192, 224, 255 };		// Brightness Levels (PWM)
+
+void setup()
+{
+	pinMode(PB, INPUT);
+
+	pinMode(L4, OUTPUT);
+	pinMode(L3, OUTPUT);
+	pinMode(L2, OUTPUT);
+	pinMode(L1, OUTPUT);
+	pinMode(CTR, OUTPUT);
+	pinMode(R1, OUTPUT);
+	pinMode(R2, OUTPUT);
+	pinMode(R3, OUTPUT);
+	pinMode(R4, OUTPUT);
+
+
+	// Uncomment the following 3 lines for getting the values during testing.
+	//Serial.begin(9600);
+	//while (!Serial);
+	//Serial.println("G-Meter Started");
+
+	// Put on Light Display
+	LightShow();
+
+	// Read Settings from EEPROM
+	GetSettings();
+
+	// Check Settings for Calibration
+	if (LR_Lo < 200 || LR_Lo > 800 || LR_Hi < 200 || LR_Hi > 800 ||
+		FR_Lo < 200 || FR_Lo > 800 || FR_Hi < 200 || FR_Hi > 800 )
+		CalError();
+
+	Ready();
+}
+
+
+// Flash LEDs 3 Times and Restore Defaults
+void CalError()
+{
+	// Out of Calibration - Show Error
+	SeqError();
+
+	// Set Default Values
+	LR_Lo = 400;
+	LR_Hi = 600;
+
+	FR_Lo = 400;
+	FR_Hi = 600;
+}
+
+// Get Calibration Settings
+void GetSettings()
+{
+	EEPROM.get(LR_LoA, LR_Lo);
+	EEPROM.get(LR_HiA, LR_Hi);
+	EEPROM.get(FR_LoA, FR_Lo);
+	EEPROM.get(FR_HiA, FR_Hi);
+}
+
+// Write to EEProm
+void SettingUpdate(int addr, int value)
+{
+	int saved;
+
+	// Write Only if Changed
+	EEPROM.get(addr, saved);
+	if (value != saved)
+		EEPROM.put(addr, value);
+}
+
+// Save Calibration Settings
+void SaveSettings()
+{
+	SettingUpdate(LR_LoA, LR_Lo);
+	SettingUpdate(LR_HiA, LR_Hi);
+	SettingUpdate(FR_LoA, FR_Lo);
+	SettingUpdate(FR_HiA, FR_Hi);
+}
+
+void Ready()
+{
+	// Turn Off All LEDs
+	AllLEDs(LOW, false);
+
+	// Turn on Center LED
+	digitalWrite(CTR, HIGH);
+}
+
+void loop()
+{
+	int i;
+	int level;
+	int bright;
+	int last;
+	int axis;
+	int press;
+	int data;
+
+	// Set Analog Reference
+	analogReference(EXTERNAL);
+
+	// Check Button
+	press = CheckSwitch();
+
+	// 2 - Calibrate Sensor
+	if (press == 2)
+	{
+		Calibrate();
+		Ready();
+		return;
+	}
+
+	// 1 - Change Mode
+	if (press == 1)
+	{
+		if (mode == MODE_X)
+			mode = MODE_Y;
+		else
+			mode = MODE_X;
+
+		SetMode(mode);
+	}
+
+	// Select Axis
+	if (mode == MODE_X)
+		axis = xout;
+	else
+		axis = yout;
+
+	// Read Sensor
+	data = GetSensor(axis);
+
+
+	// Uncomment the following 2 lines for getting the values during testing.
+	//Serial.print("Data = ");
+	//Serial.println(data);
+
+	// Map the Data to a Desired Range
+	if (mode == MODE_X)
+		data = map(data, LR_Lo, LR_Hi, -RANGE, RANGE);
+	else
+		data = map(data, FR_Lo, FR_Hi, -RANGE, RANGE);
+
+	level = abs(data);					// Get the Force Level
+	last = level / STEPS;				// Get the Last LED to Light
+	bright = Levels[level % STEPS];		// Get the Brightness Level for the Last LED
+
+	if (data > 0)
+	{
+		// Clear Left LEDs
+		for(i = 0; i < 3; i++)
+			analogWrite(LtLEDs[i], 0);
+
+		digitalWrite(LtLEDs[3], LOW);
+
+		// Turn On/Off Right PWM LEDs
+		for (i = 0; i < 3; i++)
+		{
+			if (last >= i)
+			{
+				if( last >= (i+1))
+					analogWrite(RtLEDs[i], 255);	// Full Brightness
+				else
+					analogWrite(RtLEDs[i], bright);	// Partial Brightness
+			}
+			else
+				analogWrite(RtLEDs[i], 0);
+		}
+		
+		// Turn On/Off Last Right LED
+		if (level >= RANGE)
+			digitalWrite(RtLEDs[3], HIGH);
+		else
+			digitalWrite(RtLEDs[3], LOW);
+
+	}
+	else
+	{
+		// Clear Right LEDs
+		for (i = 0; i < 3; i++)
+			analogWrite(RtLEDs[i], 0);
+
+		digitalWrite(RtLEDs[3], LOW);
+
+		// Turn On/Off Left PWM LEDs
+		for (i = 0; i < 3; i++)
+		{
+			if (last >= i)
+			{
+				if (last >= (i+1))
+					analogWrite(LtLEDs[i], 255);	// Full Brightness
+				else
+					analogWrite(LtLEDs[i], bright);	// Partial Brightness
+			}
+			else
+				analogWrite(LtLEDs[i], 0);
+		}
+
+		// Turn On/Off Last Left LED
+		if (level >= RANGE)
+			digitalWrite(LtLEDs[3], HIGH);
+		else
+			digitalWrite(LtLEDs[3], LOW);
+	}
+}
+
+int GetSensor(int axis)
+{
+	int i, data;
+
+	// Collect Samples and Average Data from ADXL335
+	data = analogRead(axis);
+
+	for (i = 1; i < POINTS; i++)
+	{
+		data += analogRead(axis);
+		delay(2);
+	}
+
+	data /= POINTS;
+
+	return data;
+}
+
+/* --------------------------------------------------------------- *
+	Return: 0 - No Press
+			1 - Short Press
+			2 - 2 Second Press
+ * --------------------------------------------------------------- */
+int CheckSwitch()
+{
+	int b1, b2;
+	long beg, end;
+
+	b1 = digitalRead(PB);
+
+	// Normally Closed Switch
+	if (b1 == HIGH)
+		return false;
+
+	// Normally Open Switch
+	// if (b1 == LOW)
+	//	return false;
+
+	beg = millis();
+
+	delay(50);	// Wait 50 msecs
+
+	// Confirm Press
+	b2 = digitalRead(PB);
+
+	if (b1 != b2)
+		return false;
+
+	// Time Press
+	do
+		b2 = digitalRead(PB);
+	while (b1 == b2);
+
+	end = millis();
+
+	// Check for Rollover
+	if (end - beg > 10000)
+		return 0;
+
+	// 2 Second Press
+	if (end - beg > 2000)
+		return 2;
+
+	return 1;
+}
+
+void SetMode(int newMode)
+{
+	int i;
+
+	// All LEDs Off
+	AllLEDs(LOW, true);
+
+	// Indicate Mode
+	if (newMode == MODE_X)
+	{
+		for (i = 0; i < 3; i++)
+		{
+			delay(500);
+
+			digitalWrite(LtLEDs[3], HIGH);
+			digitalWrite(RtLEDs[3], HIGH);
+
+			delay(500);
+
+			digitalWrite(LtLEDs[3], LOW);
+			digitalWrite(RtLEDs[3], LOW);
+		}
+	}
+	else
+	{
+		for (i = 0; i < 3; i++)
+		{
+			delay(500);
+
+			digitalWrite(CTR, HIGH);
+
+			delay(500);
+
+			digitalWrite(CTR, LOW);
+		}
+	}
+
+	delay(500);
+	digitalWrite(CTR, HIGH);
+}
+
+void LightShow()
+{
+	int i;
+
+	// Center LED
+	digitalWrite(CTR, HIGH);
+
+	delay(500);
+
+	digitalWrite(CTR, LOW);
+
+	// Left and Right in Sequence
+	for (i = 0; i < 3; i++)
+	{
+		analogWrite(LtLEDs[i], 255);
+		analogWrite(RtLEDs[i], 255);
+
+		delay(500);
+
+		analogWrite(LtLEDs[i], 0);
+		analogWrite(RtLEDs[i], 0);
+	}
+
+	digitalWrite(LtLEDs[3], HIGH);
+	digitalWrite(RtLEDs[3], HIGH);
+
+	delay(500);
+
+	digitalWrite(LtLEDs[3], LOW);
+	digitalWrite(RtLEDs[3], LOW);
+
+	for (i = 2; i >= 0; i--)
+	{
+		analogWrite(LtLEDs[i], 255);
+		analogWrite(RtLEDs[i], 255);
+
+		delay(500);
+
+		analogWrite(LtLEDs[i], 0);
+		analogWrite(RtLEDs[i], 0);
+	}
+
+	digitalWrite(CTR, HIGH);
+
+	delay(500);
+
+	// All LEDs On
+	AllLEDs(HIGH, true);
+
+	delay(500);
+
+	// All LEDs Off
+	AllLEDs(LOW, true);
+}
+
+// Flash All LEDs to Indicate Error
+void SeqError()
+{
+	int i;
+
+	for (i = 0; i < 5; i++)
+	{
+		AllLEDs(HIGH, true);
+
+		delay(400);
+
+		AllLEDs(LOW, true);
+
+		delay(400);
+	}
+}
+
+void SeqLeft()
+{
+	int i;
+
+	// All Off
+	AllLEDs(LOW, true);
+
+	delay(200);
+
+	digitalWrite(CTR, HIGH);
+
+	delay(200);
+
+	// Left in Sequence
+	for (i = 0; i < 3; i++)
+	{
+		analogWrite(LtLEDs[i], 255);
+
+		delay(200);
+	}
+
+	digitalWrite(LtLEDs[3], HIGH);
+
+	delay(200);
+}
+
+// Turn All LEDs On or Off, Center LED Optional
+void AllLEDs(int on, bool center)
+{
+	int i, level;
+
+	if (on == HIGH)
+		level = 255;
+	else
+		level = 0;
+
+	for (i = 0; i < 3; i++)
+	{
+		analogWrite(LtLEDs[i], level);
+		analogWrite(RtLEDs[i], level);
+	}
+
+	digitalWrite(LtLEDs[3], on);
+	digitalWrite(RtLEDs[3], on);
+
+	if (center)
+		digitalWrite(CTR, on);
+}
+
+// Provides a Delay and Return Button Press
+bool CalPress()
+{
+	int b1, b2;
+
+	delay(200);
+
+	b1 = digitalRead(PB);
+
+	// Normally Closed Switch
+	if (b1 == HIGH)
+		return false;
+
+	// Normally Open Switch
+	// if (b1 == LOW)
+	//	return false;
+
+	delay(50);	// Wait 50 msecs
+
+	// Confirm Press
+	b2 = digitalRead(PB);
+
+	if (b1 != b2)
+		return false;
+	else
+	{
+		// Wait for Release
+		do
+			b2 = digitalRead(PB);
+		while (b1 == b2);
+
+		return true;
+	}
+}
+
+// Calibrate Left
+void CalLeft()
+{
+	int i;
+	do
+	{
+		AllLEDs(LOW, true);
+
+		if (CalPress()) return;
+
+		digitalWrite(CTR, HIGH);
+
+		if (CalPress()) return;
+
+		for (i = 0; i < 3; i++)
+		{
+			analogWrite(LtLEDs[i], 255);
+
+			if (CalPress()) return;
+		}
+
+		digitalWrite(LtLEDs[3], HIGH);
+
+		if (CalPress()) return;
+
+	} while (true);
+}
+
+// Calibrate Right
+void CalRight()
+{
+	int i;
+	do
+	{
+		AllLEDs(LOW, true);
+
+		if (CalPress()) return;
+
+		digitalWrite(CTR, HIGH);
+
+		if (CalPress()) return;
+
+		for (i = 0; i < 3; i++)
+		{
+			analogWrite(RtLEDs[i], 255);
+
+			if (CalPress()) return;
+		}
+
+		digitalWrite(RtLEDs[3], HIGH);
+
+		if (CalPress()) return;
+
+	} while (true);
+}
+
+// Calibrate Front
+void CalFront()
+{
+	int i;
+	do
+	{
+		AllLEDs(LOW, true);
+
+		if (CalPress()) return;
+
+		digitalWrite(RtLEDs[3], HIGH);
+
+		if (CalPress()) return;
+
+		for (i = 2; i >= 0; i--)
+		{
+			analogWrite(RtLEDs[i], 255);
+
+			if (CalPress()) return;
+		}
+
+		digitalWrite(CTR, HIGH);
+
+		if (CalPress()) return;
+
+	} while (true);
+}
+
+// Calibrate Rear
+void CalRear()
+{
+	int i;
+	do
+	{
+		AllLEDs(LOW, true);
+
+		if (CalPress()) return;
+
+		digitalWrite(LtLEDs[3], HIGH);
+
+		if (CalPress()) return;
+
+		for (i = 2; i >= 0; i--)
+		{
+			analogWrite(LtLEDs[i], 255);
+
+			if (CalPress()) return;
+		}
+
+		digitalWrite(CTR, HIGH);
+
+		if (CalPress()) return;
+
+	} while (true);
+}
+
+/* ------------------------------------------------------------------- *
+	Perform Calibration
+	User must hold meter vertical for each axis and press the button
+	when in position.
+	
+	Hold left side down and press button.
+	Hold right side down and press button.
+	Hold front down and press button.
+	Hold back down and press button.
+
+	All LEDs flashing indicates a calibration error.
+
+	When calibrated only center LED should be lit when the device is
+	on a flat surface.
+ * ------------------------------------------------------------------- */
+void Calibrate()
+{
+	CalLeft();
+
+	LR_Lo = GetSensor(xout);
+
+	if (LR_Lo < 200 || LR_Lo > 800)
+	{
+		CalError();
+		return;
+	}
+
+	CalRight();
+
+	LR_Hi = GetSensor(xout);
+
+	if (LR_Hi < 200 || LR_Hi > 800)
+	{
+		CalError();
+		return;
+	}
+
+	CalFront();
+
+	FR_Lo = GetSensor(yout);
+
+	if (FR_Lo < 200 || FR_Lo > 800)
+	{
+		CalError();
+		return;
+	}
+
+	CalRear();
+
+	FR_Hi = GetSensor(yout);
+
+	if (FR_Hi < 200 || FR_Hi > 800)
+	{
+		CalError();
+		return;
+	}
+
+
+	SaveSettings();
+}
